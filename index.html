@@ -44,7 +44,7 @@
   </head>
   <body>
     <div class="card">
-      <h2>WebRTC Voice 1-to-1 (Signaling via WebSocket)</h2>
+      <h2>WebRTC Voice 1-to-many</h2>
       <p>
         Enter a room name (same on both tabs/devices). Allow microphone when
         prompted. One side clicks <strong>Call</strong>, the other sees an
@@ -53,30 +53,21 @@
 
       <label
         >Signaling server (default uses same host):
-        <input
-          id="serverUrl"
-          value="wss://discovering-webrtc.onrender.com"
-          style="width: 100%"
-        />
+        <input id="serverUrl" value="ws://localhost:3000" style="width: 100%" />
       </label>
 
       <label
         >Room name:
-        <input id="room" placeholder="room123" style="width: 100%" />
+        <input
+          id="room"
+          placeholder="room123"
+          style="width: 100%"
+          value="room"
+        />
       </label>
 
       <div class="row">
         <button id="joinBtn">Join Room</button>
-        <button id="callBtn" disabled>Call</button>
-        <button id="hangBtn" disabled>Hang up</button>
-      </div>
-
-      <div id="incoming" style="margin-top: 12px; display: none">
-        <strong>Incoming call</strong>
-        <div class="row">
-          <button id="acceptBtn">Accept</button>
-          <button id="rejectBtn">Reject</button>
-        </div>
       </div>
 
       <h4>Local / Remote</h4>
@@ -92,12 +83,12 @@
     </div>
   </body>
   <script>
-    // Minimal WebRTC voice 1-to-1 client
+    // Minimal WebRTC voice 1-to-Many client
     let localStream = null;
-    let pc = null;
+    let PCs = new Map(); // ID -> PC
+    let MyId = null;
     let ws = null;
     let room = null;
-    let isCaller = false;
     let remoteAudio = document.getElementById('remoteAudio');
 
     const logEl = document.getElementById('log');
@@ -113,65 +104,11 @@
     const serverUrlInput = document.getElementById('serverUrl');
     const roomInput = document.getElementById('room');
     const joinBtn = document.getElementById('joinBtn');
-    const callBtn = document.getElementById('callBtn');
-    const hangBtn = document.getElementById('hangBtn');
     const incomingDiv = document.getElementById('incoming');
-    const acceptBtn = document.getElementById('acceptBtn');
-    const rejectBtn = document.getElementById('rejectBtn');
     const localState = document.getElementById('localState');
     const remoteState = document.getElementById('remoteState');
 
     joinBtn.addEventListener('click', async () => {
-      const url = serverUrlInput.value.trim();
-      room = roomInput.value.trim();
-      if (!room) {
-        alert('Enter room name');
-        return;
-      }
-
-      ws = new WebSocket(url);
-      ws.addEventListener('open', () => {
-        log('WS open');
-        ws.send(JSON.stringify({ type: 'join', room }));
-        joinBtn.disabled = true;
-        callBtn.disabled = false;
-      });
-
-      ws.addEventListener('message', async (ev) => {
-        const msg = JSON.parse(ev.data);
-        log('ws<-', msg);
-
-        if (msg.type === 'joined') {
-          log('Joined room', room, 'peers:', msg.peers);
-        } else if (msg.type === 'offer') {
-          // incoming call
-          incomingDiv.style.display = 'block';
-          window._incomingOffer = msg; // store until accept
-        } else if (msg.type === 'answer') {
-          await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-          log('Set remote answer');
-        } else if (msg.type === 'candidate') {
-          if (pc) {
-            try {
-              await pc.addIceCandidate(msg.candidate);
-              log('Added remote ICE candidate');
-            } catch (e) {
-              log('Error addIce', e);
-            }
-          }
-        } else if (msg.type === 'leave') {
-          log('Peer left');
-          cleanup();
-        }
-      });
-
-      ws.addEventListener('close', () => {
-        log('WS closed');
-      });
-      ws.addEventListener('error', (e) => {
-        log('WS error', e);
-      });
-
       // prepare local audio, but don't create offer yet
       try {
         localStream = await navigator.mediaDevices.getUserMedia({
@@ -183,73 +120,121 @@
         alert('Microphone permission required: ' + e.message);
         log('getUserMedia failed', e);
       }
-    });
-
-    callBtn.addEventListener('click', async () => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        alert('Connect signaling first');
+      const url = serverUrlInput.value.trim();
+      room = roomInput.value.trim();
+      if (!room) {
+        alert('Enter room name');
         return;
       }
-      isCaller = true;
-      // must be connection for each Peer Existing
-      await startPeerConnection();
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      log('Created offer');
-      ws.send(
-        JSON.stringify({ type: 'offer', room, sdp: pc.localDescription })
-      );
+      ws = new WebSocket(url);
+      ws.addEventListener('open', async () => {
+        log('WS open');
+        ws.send(JSON.stringify({ type: 'join', room }));
+        joinBtn.disabled = true;
+      });
+
+      ws.addEventListener('message', async (ev) => {
+        const msg = JSON.parse(ev.data);
+        log('ws<-', msg);
+
+        if (msg.type === 'joined') {
+          // backend send all IDs of room members
+          // then we open a connection with each peer in a room
+          MyId = msg.asingnedId;
+          log('Joined room with id', room, MyId);
+          // must be connection for each Peer Existing
+          msg.peersIDs.forEach(async (Id) => {
+            let pc = await startPeerConnection(Id);
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            log('Created offer');
+            ws.send(
+              JSON.stringify({
+                type: 'offer',
+                room,
+                sdp: pc.localDescription,
+                source: MyId,
+                target: Id,
+              })
+            );
+          });
+        } else if (msg.type === 'offer') {
+          // incoming call
+          let pc = await startPeerConnection(msg.source);
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+          console.log('sdp is => ', msg.sdp);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          ws.send(
+            JSON.stringify({
+              type: 'answer',
+              room,
+              sdp: pc.localDescription,
+              source: MyId,
+              target: msg.source,
+            })
+          );
+          log('Sent answer');
+        } else if (msg.type === 'answer') {
+          let pc = PCs.get(msg.source);
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+          log('Set remote answer');
+        } else if (msg.type === 'candidate') {
+          if (PCs.get(msg.source)) {
+            try {
+              let pc = PCs.get(msg.source);
+              await pc.addIceCandidate(msg.candidate);
+              log('Added remote ICE candidate');
+            } catch (e) {
+              log('Error addIce', e);
+            }
+          }
+        } else if (msg.type === 'leave') {
+          log('One Peer left');
+          PCs.get(msg.source).close();
+          PCs.delete(msg.source);
+          if (PCs.size === 0) {
+            cleanup();
+          }
+        }
+      });
+
+      ws.addEventListener('close', () => {
+        log('WS closed');
+      });
+      ws.addEventListener('error', (e) => {
+        log('WS error', e);
+      });
     });
 
-    acceptBtn.addEventListener('click', async () => {
-      incomingDiv.style.display = 'none';
-      const msg = window._incomingOffer;
-      if (!msg) return;
-      await startPeerConnection();
-      await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-      console.log('sdp is => ', msg.sdp);
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      ws.send(
-        JSON.stringify({ type: 'answer', room, sdp: pc.localDescription })
-      );
-      log('Sent answer');
-    });
-
-    rejectBtn.addEventListener('click', () => {
-      incomingDiv.style.display = 'none';
-      window._incomingOffer = null;
-      ws.send(JSON.stringify({ type: 'reject', room }));
-    });
-
-    hangBtn.addEventListener('click', () => {
-      ws && ws.send(JSON.stringify({ type: 'hangup', room }));
-      cleanup();
-    });
-
-    async function startPeerConnection() {
-      if (pc) return;
-      pc = new RTCPeerConnection({
+    async function startPeerConnection(Id) {
+      if (PCs.get(Id)) return PCs.get(Id);
+      let tempPc = new RTCPeerConnection({
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
           // add TURN here if you have one: {urls:'turn:turn.example.com', username:'u', credential:'p'}
         ],
       });
+      tempPc.Id = Id;
+      PCs.set(Id, tempPc);
 
-      pc.onicecandidate = (ev) => {
+      tempPc.onicecandidate = function (ev) {
         if (ev.candidate) {
           log('Local ICE candidate', ev.candidate);
+          console.log('source ', MyId);
           ws.send(
             JSON.stringify({
               type: 'candidate',
               room,
               candidate: ev.candidate,
+              source: MyId,
+              target: tempPc.Id,
             })
           );
         }
       };
 
-      pc.ontrack = (ev) => {
+      tempPc.ontrack = (ev) => {
         log('Remote track', ev.streams);
         remoteAudio.srcObject = ev.streams[0];
         remoteState.textContent = 'playing';
@@ -257,32 +242,33 @@
 
       // add local audio track
       if (localStream) {
-        for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
+        for (const t of localStream.getTracks())
+          tempPc.addTrack(t, localStream);
       } else {
         try {
+          console.log('forget the NAVVVVVVVVVV');
           localStream = await navigator.mediaDevices.getUserMedia({
             audio: true,
           });
-          for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
+          for (const t of localStream.getTracks())
+            tempPc.addTrack(t, localStream);
         } catch (e) {
           log('Could not get mic', e);
         }
       }
-
-      hangBtn.disabled = false;
+      return tempPc;
     }
 
     function cleanup() {
-      if (pc) {
+      log('i will clean Up');
+      for (const pc of PCs.values()) {
         pc.close();
-        pc = null;
       }
+      PCs.clear();
       if (remoteAudio) {
         remoteAudio.srcObject = null;
       }
       remoteState.textContent = 'no stream';
-      hangBtn.disabled = true;
-      callBtn.disabled = false;
     }
   </script>
 </html>

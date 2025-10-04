@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const server = http.createServer(app);
@@ -25,24 +26,23 @@ wss.on('connection', (ws) => {
 
     if (type === 'join') {
       ws.room = room;
+      ws.ID = uuidv4();
       if (!rooms.has(room)) rooms.set(room, new Set());
+
+      const peersIDs = Array.from(rooms.get(room), (ws) => ws.ID);
+
       rooms.get(room).add(ws);
       // send joined + count
-      const peers = Array.from(rooms.get(room)).length - 1; // others
-      ws.send(JSON.stringify({ type: 'joined', peers }));
+      ws.send(JSON.stringify({ type: 'joined', peersIDs, asingnedId: ws.ID }));
     } else if (room && rooms.has(room)) {
       // forward signaling messages to other peers in the same room
       const set = rooms.get(room);
       for (const client of set) {
-        if (client !== ws && client.readyState === WebSocket.OPEN) {
-          // forward offer/answer/candidate/hangup/reject
+        if (client.ID === data.target && client.readyState === WebSocket.OPEN) {
+          // forward to target offer/answer/candidate
           client.send(JSON.stringify(data));
+          break;
         }
-      }
-
-      // cleanup if hangup or leave
-      if (type === 'hangup' || type === 'leave' || type === 'reject') {
-        // optionally remove ws from room
       }
     }
   });
@@ -53,7 +53,7 @@ wss.on('connection', (ws) => {
       // notify remaining peers
       for (const client of rooms.get(ws.room)) {
         if (client.readyState === WebSocket.OPEN)
-          client.send(JSON.stringify({ type: 'leave' }));
+          client.send(JSON.stringify({ type: 'leave', source: ws.ID }));
       }
       if (rooms.get(ws.room).size === 0) rooms.delete(ws.room);
     }
