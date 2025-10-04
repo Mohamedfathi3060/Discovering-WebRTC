@@ -197,6 +197,8 @@
           log('One Peer left');
           PCs.get(msg.source).close();
           PCs.delete(msg.source);
+          const audio = document.getElementById(`audio-${msg.source}`);
+          if (audio) audio.remove();
           if (PCs.size === 0) {
             cleanup();
           }
@@ -240,7 +242,11 @@
 
       tempPc.ontrack = (ev) => {
         log('Remote track', ev.streams);
-        remoteAudio.srcObject = ev.streams[0];
+        let audio = document.createElement('audio');
+        audio.autoplay = true;
+        audio.srcObject = ev.streams[0];
+        audio.id = `audio-${tempPc.Id}`;
+        document.body.appendChild(audio);
         remoteState.textContent = 'playing';
       };
 
