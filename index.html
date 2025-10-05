@@ -72,6 +72,7 @@
 
       <div class="row">
         <button id="joinBtn">Join Room</button>
+        <button id="muteBtn">Mute</button>
       </div>
 
       <h4>Local / Remote</h4>
@@ -81,8 +82,6 @@
         <strong>Remote audio:</strong> <span id="remoteState">no stream</span>
       </p>
 
-      <audio id="remoteAudio" autoplay playsinline></audio>
-
       <div id="log"></div>
     </div>
   </body>
@@ -90,10 +89,10 @@
     // Minimal WebRTC voice 1-to-Many client
     let localStream = null;
     let PCs = new Map(); // ID -> PC
+    let mute = false;
     let MyId = null;
     let ws = null;
     let room = null;
-    let remoteAudio = document.getElementById('remoteAudio');
 
     const logEl = document.getElementById('log');
     function log(...args) {
@@ -108,6 +107,8 @@
     const serverUrlInput = document.getElementById('serverUrl');
     const roomInput = document.getElementById('room');
     const joinBtn = document.getElementById('joinBtn');
+    const muteBtn = document.getElementById('muteBtn');
+    muteBtn.disabled = true;
     const incomingDiv = document.getElementById('incoming');
     const localState = document.getElementById('localState');
     const remoteState = document.getElementById('remoteState');
@@ -123,6 +124,7 @@
       } catch (e) {
         alert('Microphone permission required: ' + e.message);
         log('getUserMedia failed', e);
+        return;
       }
       const url = serverUrlInput.value.trim();
       room = roomInput.value.trim();
@@ -131,8 +133,9 @@
         return;
       }
       ws = new WebSocket(url);
+      muteBtn.disabled = false;
       ws.addEventListener('open', async () => {
-        log('WS open');
+        log('My WS open');
         ws.send(JSON.stringify({ type: 'join', room }));
         joinBtn.disabled = true;
       });
@@ -206,11 +209,24 @@
       });
 
       ws.addEventListener('close', () => {
-        log('WS closed');
+        log('My WS closed');
       });
       ws.addEventListener('error', (e) => {
-        log('WS error', e);
+        log('My WS error', e);
       });
+    });
+
+    muteBtn.addEventListener('click', async () => {
+      if (!localStream) {
+        mute != mute;
+        return;
+      }
+      const audioTrack = localStream.getAudioTracks()[0];
+      audioTrack.enabled = !audioTrack.enabled;
+      log('mic is Muted', !audioTrack.enabled);
+      audioTrack.enabled
+        ? (muteBtn.innerText = 'Mute')
+        : (muteBtn.innerText = 'unMute');
     });
 
     async function startPeerConnection(Id) {
@@ -275,9 +291,6 @@
         pc.close();
       }
       PCs.clear();
-      if (remoteAudio) {
-        remoteAudio.srcObject = null;
-      }
       remoteState.textContent = 'no stream';
     }
   </script>
